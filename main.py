@@ -1,9 +1,11 @@
 """
 FastAPI service for the SHL Assessment Recommender Agent.
 Endpoints: GET /health, POST /chat
-Pre-loads catalog and FAISS index at startup via lifespan.
+Loads catalog and FAISS index in a background thread so the port opens immediately.
 """
 import asyncio
+import os
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -11,7 +13,32 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from retrieval import initialize_retriever
-from agent import process_chat
+
+
+# --- Global readiness flag ---
+_ready = False
+
+
+def _background_init():
+    """Run heavy initialization in a background thread."""
+    global _ready
+    print("[Startup] Background: Loading catalog and FAISS index...", flush=True)
+    try:
+        initialize_retriever()
+        _ready = True
+        print("[Startup] Background: Initialization complete. Ready to serve.", flush=True)
+    except Exception as e:
+        print(f"[Startup] Background: INIT FAILED: {e}", flush=True)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start background initialization, yield immediately so uvicorn binds the port."""
+    thread = threading.Thread(target=_background_init, daemon=True)
+    thread.start()
+    print("[Startup] Server is starting, model loading in background...", flush=True)
+    yield
+    print("[Shutdown] Cleaning up...", flush=True)
 
 
 # --- Pydantic models for strict schema validation ---
@@ -41,19 +68,7 @@ class HealthResponse(BaseModel):
     status: str
 
 
-# --- FastAPI app with lifespan for startup initialization ---
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Initialize vector store and catalog at startup."""
-    print("[Startup] Pre-loading catalog and FAISS index...")
-    # Run the heavy initialization in a thread to not block the event loop
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, initialize_retriever)
-    print("[Startup] Initialization complete. Ready to serve requests.")
-    yield
-    print("[Shutdown] Cleaning up...")
-
+# --- FastAPI app ---
 
 app = FastAPI(
     title="SHL Assessment Recommender Agent",
@@ -76,7 +91,7 @@ app.add_middleware(
 
 @app.get("/health", response_model=HealthResponse)
 async def health():
-    """Health check endpoint. Must respond within 2 minutes on cold start."""
+    """Health check endpoint. Responds immediately even during init."""
     return HealthResponse(status="ok")
 
 
@@ -87,7 +102,18 @@ async def chat(request: ChatRequest):
     Accepts full conversation history and returns a response with
     optional recommendations.
     """
+    # If the model isn't loaded yet, return a friendly message
+    if not _ready:
+        return ChatResponse(
+            reply="I'm still warming up — please try again in a few seconds!",
+            recommendations=[],
+            end_of_conversation=False,
+        )
+
     try:
+        # Lazy import to avoid circular issues during background init
+        from agent import process_chat
+
         # Convert Pydantic models to dicts for the agent
         messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
@@ -129,4 +155,5 @@ async def chat(request: ChatRequest):
 # --- Run directly with uvicorn ---
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
