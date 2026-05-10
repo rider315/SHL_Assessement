@@ -2,8 +2,8 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 requests==2.32.3
 beautifulsoup4==4.12.3
-sentence-transformers==3.0.1
-faiss-cpu==1.8.0.post1
+scikit-learn==1.8.0
+numpy==1.26.4
 google-genai
 pydantic==2.9.1
 python-dotenv==1.0.1
